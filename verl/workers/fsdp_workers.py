@@ -41,13 +41,37 @@ from verl.utils.py_functional import append_to_dict
 from codetiming import Timer
 
 
-from verl.utils.openvla_utils import update_auto_map , check_model_logic_mismatch
-from peft import LoraConfig, PeftModel, get_peft_model, TaskType
+from verl.utils.openvla_utils import update_auto_map , check_model_logic_mismatch, package_openvla_oft_checkpoint
 import json
+
+try:
+    from peft import LoraConfig, PeftModel, get_peft_model, get_peft_model_state_dict
+    PEFT_IMPORT_ERROR = None
+except ImportError as exc:
+    LoraConfig = None
+    PeftModel = None
+    get_peft_model = None
+    get_peft_model_state_dict = None
+    PEFT_IMPORT_ERROR = exc
 
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv('VERL_PPO_LOGGING_LEVEL', 'WARN'))
+
+DEFAULT_VLA_LORA_TARGET_MODULES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+    "projector.fc1",
+    "projector.fc2",
+    "projector.fc3",
+    "proprio_projector.fc1",
+    "proprio_projector.fc2",
+)
 
 def convert_to_regular_types(obj):
     """Convert Hydra configs and other special types to regular Python types."""
@@ -59,6 +83,39 @@ def convert_to_regular_types(obj):
     elif isinstance(obj, dict):
         return {k: convert_to_regular_types(v) for k, v in obj.items()}
     return obj
+
+
+def ensure_peft_available():
+    if PEFT_IMPORT_ERROR is not None:
+        raise ImportError(
+            "LoRA training requires the optional `peft` dependency. "
+            "Install a PEFT release compatible with your OpenVLA/OpenVLA-OFT environment before setting "
+            "`model.lora_rank > 0`."
+        ) from PEFT_IMPORT_ERROR
+
+
+def resolve_vla_lora_target_modules(model, target_modules, use_proprio=False):
+    target_modules = convert_to_regular_types(target_modules)
+    if isinstance(target_modules, str):
+        preset = target_modules.strip().lower()
+        if preset == "all-linear":
+            return "all-linear"
+        if preset in {"llm-projector", "llm_projector", "default"}:
+            resolved = list(DEFAULT_VLA_LORA_TARGET_MODULES)
+            if not use_proprio:
+                resolved = [name for name in resolved if not name.startswith("proprio_projector.")]
+            module_names = [name for name, _ in model.named_modules()]
+            resolved = [
+                target_name for target_name in resolved
+                if any(module_name.endswith(target_name) for module_name in module_names)
+            ]
+            if not resolved:
+                raise ValueError("No OpenVLA-OFT LoRA target modules were found for the llm-projector preset.")
+            return resolved
+        return [target_modules]
+    if isinstance(target_modules, tuple):
+        target_modules = list(target_modules)
+    return target_modules
 
 
 class RobActorRolloutRefWorker(Worker):
@@ -124,6 +181,7 @@ class RobActorRolloutRefWorker(Worker):
 
         log_gpu_memory_usage('Before init from HF AutoModel', logger=logger)
         local_path = copy_local_path_from_hdfs(model_path)
+        self.model_local_path = local_path
         #add oft
          
         if self.config.model.vla == "openvla-oft":
@@ -233,17 +291,21 @@ class RobActorRolloutRefWorker(Worker):
                 actor_module.gradient_checkpointing_enable()
             # lora add
             if self._is_lora:
+                ensure_peft_available()
                 print("Applying LoRA to actor module")
-                
+
                 lora_config = {
-                    #'task_type': TaskType.CAUSAL_LM,
                     'r': self.config.model.lora_rank,
                     'lora_alpha': self.config.model.lora_alpha,
                     "lora_dropout": 0 ,
-                    'target_modules': convert_to_regular_types(self.config.model.target_modules),
+                    'target_modules': resolve_vla_lora_target_modules(
+                        actor_module,
+                        self.config.model.target_modules,
+                        use_proprio=self.config.rollout.use_proprio,
+                    ),
                     'init_lora_weights': "gaussian"
                 }
-                actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))  
+                actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
                 actor_module.print_trainable_parameters()
             # lora end
                 
@@ -570,8 +632,7 @@ class RobActorRolloutRefWorker(Worker):
         
         import torch.distributed as dist
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        from peft import PeftModel
-        import transformers
+        from transformers import AutoModelForVision2Seq
         
         if self._is_offload_param:
             load_fsdp_param_and_grad(module=self.actor_module_fsdp,
@@ -579,7 +640,7 @@ class RobActorRolloutRefWorker(Worker):
                                      load_grad=self._is_offload_grad)
 
         #lora add
-        if self._is_lora and isinstance(self.actor_module, PeftModel):
+        if self._is_lora and PeftModel is not None and isinstance(self.actor_module, PeftModel):
             if dist.get_rank() == 0:
                 os.makedirs(local_path, exist_ok=True)
 
@@ -588,14 +649,8 @@ class RobActorRolloutRefWorker(Worker):
             if isinstance(self.actor_module_fsdp, FSDP):
                 with FSDP.summon_full_params(self.actor_module_fsdp, writeback=False, offload_to_cpu=True):
                     if dist.get_rank() == 0:
-                        from typing import OrderedDict
-                        lora_params = OrderedDict()
-                        model = self.actor_module_fsdp._fsdp_wrapped_module.base_model.model
-                        for name, param in model.named_parameters():
-                            if ".lora_" in name:
-                                name = "base_model.model." + name.replace("._fsdp_wrapped_module.", ".")
-                                lora_params[name] = param
-                        self.actor_module_fsdp.save_pretrained(
+                        lora_params = get_peft_model_state_dict(self.actor_module)
+                        self.actor_module.save_pretrained(
                             lora_save_path,
                             state_dict=lora_params,
                             safe_serialization=True
@@ -609,13 +664,20 @@ class RobActorRolloutRefWorker(Worker):
             
             # save total model
             base_vla = AutoModelForVision2Seq.from_pretrained(
-                self.config.model.path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True, device_map="cpu"
+                self.model_local_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True, device_map="cpu"
             )
             merged_vla = PeftModel.from_pretrained(base_vla, lora_save_path)
             merged_vla = merged_vla.merge_and_unload()
 
             if dist.get_rank() == 0:
-                merged_vla.save_pretrained(local_path)
+                merged_vla.save_pretrained(local_path, safe_serialization=True)
+                self.tokenizer.save_pretrained(local_path)
+                if self.config.model.vla == "openvla-oft":
+                    package_openvla_oft_checkpoint(
+                        checkpoint_dir=local_path,
+                        source_checkpoint=self.model_local_path,
+                        norm_stats=getattr(merged_vla, "norm_stats", None),
+                    )
                 print(f"Saved merged model at: {local_path}")
 
             # Wait for merged model to be saved
@@ -634,6 +696,12 @@ class RobActorRolloutRefWorker(Worker):
                 os.makedirs(local_path, exist_ok=True)
                 self.actor_module.save_pretrained(local_path, state_dict=state_dict)
                 self.tokenizer.save_pretrained(local_path)
+                if self.config.model.vla == "openvla-oft":
+                    package_openvla_oft_checkpoint(
+                        checkpoint_dir=local_path,
+                        source_checkpoint=self.model_local_path,
+                        norm_stats=getattr(self.actor_module, "norm_stats", None),
+                    )
                 if hdfs_path is not None:
                     print(f'Uploading actor checkpoint to {hdfs_path}')
                     hdfs_io.makedirs(hdfs_path, exist_ok=True)

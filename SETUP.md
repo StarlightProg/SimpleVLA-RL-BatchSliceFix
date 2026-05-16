@@ -39,6 +39,7 @@ pip3 install torch torchvision
 git clone https://github.com/moojink/openvla-oft.git
 cd openvla-oft
 pip install -e .
+pip install peft
 
 # Install Flash Attention 2 for training
 # If you encounter issues, try `pip cache remove flash_attn` first
@@ -91,6 +92,7 @@ pip3 install torch torchvision
 git clone https://github.com/moojink/openvla-oft.git
 cd openvla-oft
 pip install -e .
+pip install peft
 
 # Install Flash Attention 2
 pip install packaging ninja

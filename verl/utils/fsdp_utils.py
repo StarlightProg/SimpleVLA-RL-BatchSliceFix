@@ -69,7 +69,16 @@ def get_fsdp_wrap_policy(module, config=None):
     return auto_wrap_policy
 
 def get_fsdp_wrap_policy_vla(module, config=None, is_lora=False):
-    
+    try:
+        from peft import PeftModel
+    except ImportError:
+        PeftModel = None
+
+    if PeftModel is not None and isinstance(module, PeftModel):
+        module = module.get_base_model()
+        if hasattr(module, "model"):
+            module = module.model
+
     from timm.models.vision_transformer import Block, VisionTransformer
     from torch.distributed.fsdp.wrap import _module_wrap_policy, _or_policy, transformer_auto_wrap_policy, lambda_auto_wrap_policy
     vit_wrap_policy = functools.partial(_module_wrap_policy, module_classes={VisionTransformer})

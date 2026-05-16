@@ -35,7 +35,7 @@ actor_rollout_ref:
     use_remove_padding: False
     lora_rank: 0  # Set to positive value to enable LoRA (e.g., 32)
     lora_alpha: 32  # LoRA scaling factor
-    target_modules: all-linear  
+    target_modules: llm-projector  # llm-projector or all-linear
   actor:
     vla: ${actor_rollout_ref.model.vla}
     action_token_len: ${actor_rollout_ref.model.action_token_len}
@@ -150,7 +150,7 @@ critic:
       fsdp_size: -1
     lora_rank: 0  # Set to positive value to enable LoRA (e.g., 32)
     lora_alpha: 32  # LoRA scaling factor
-    target_modules: all-linear 
+    target_modules: llm-projector
     type: value # if set to implicit, this will become an implicit PRM which updates according to gt. this only supports initializing from the reference model currently.
   ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
   ppo_micro_batch_size: 64

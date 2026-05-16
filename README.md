@@ -141,6 +141,12 @@ Before running the training script, ensure the following configurations are prop
   or
   bash examples/run_openvla_oft_rl_twin2.sh
   ```
+
+  For a lower-VRAM OpenVLA-OFT adapter run on LIBERO, use:
+
+  ```bash
+  bash examples/run_openvla_oft_rl_libero_lora.sh
+  ```
   
 
 #### 4. Run Evaluation

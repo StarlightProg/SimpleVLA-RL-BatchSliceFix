@@ -23,6 +23,15 @@ json_numpy.patch()
 np.set_printoptions(formatter={"float": lambda x: "{0:0.3f}".format(x)})
 
 
+OPENVLA_OFT_RUNTIME_FILES = (
+    "configuration_prismatic.py",
+    "constants.py",
+    "modeling_prismatic.py",
+    "processing_prismatic.py",
+    "train_utils.py",
+)
+
+
 def update_auto_map(pretrained_checkpoint: str) -> None:
     """
     Update the AutoMap configuration in the checkpoint config.json file.
@@ -166,6 +175,41 @@ def check_model_logic_mismatch(pretrained_checkpoint: str) -> None:
 
         checkpoint_filepath = os.path.join(pretrained_checkpoint, filename)
         _handle_file_sync(curr_filepath, checkpoint_filepath, filename)
+
+
+def package_openvla_oft_checkpoint(
+    checkpoint_dir: Union[str, Path],
+    source_checkpoint: Optional[Union[str, Path]] = None,
+    norm_stats: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Ensure a saved OpenVLA-OFT checkpoint contains the custom runtime files and
+    dataset statistics expected by this repository.
+
+    Args:
+        checkpoint_dir: Target checkpoint directory to package.
+        source_checkpoint: Optional source checkpoint to copy dataset statistics from.
+        norm_stats: Optional in-memory normalization statistics to write.
+    """
+    checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    runtime_dir = Path(__file__).resolve().parent / "vla_utils" / "openvla_oft"
+    for filename in OPENVLA_OFT_RUNTIME_FILES:
+        src = runtime_dir / filename
+        if src.exists():
+            shutil.copy2(src, checkpoint_dir / filename)
+
+    dataset_statistics_path = checkpoint_dir / "dataset_statistics.json"
+    if norm_stats is not None:
+        with open(dataset_statistics_path, "w") as f:
+            json.dump(norm_stats, f, indent=2)
+    elif source_checkpoint is not None:
+        src_stats = Path(source_checkpoint) / "dataset_statistics.json"
+        if src_stats.exists():
+            shutil.copy2(src_stats, dataset_statistics_path)
+
+    update_auto_map(str(checkpoint_dir))
 
 
 
