@@ -432,7 +432,7 @@ class RayTrainer(object):
                                            collate_fn=collate_fn))
         self.val_dataloader = DataLoader(dataset=self.val_dataset,
                                          batch_size=self.config.data.val_batch_size,
-                                         shuffle=True,
+                                         shuffle=False,
                                          drop_last=True,
                                          collate_fn=collate_fn)
 
@@ -450,60 +450,79 @@ class RayTrainer(object):
             self.config.critic.optim.total_training_steps = total_training_steps
 
     def _validate(self, global_steps=0):
-        reward_tensor_lst = []
-        data_source_lst = []
+        validation_cfg = self.config.trainer.get('validation', {})
+        target_rollouts = int(validation_cfg.get('target_rollouts', 100))
+        # hard cap to avoid endless loops when config is accidentally wrong
+        max_passes = int(validation_cfg.get('max_passes', 20))
+
+        total = 0
+        total_sum = 0.0
+        total_sumsq = 0.0
+        data_source_stats = defaultdict(lambda: [0, 0.0])  # count, sum
+
+        passes = 0
+        while total < target_rollouts and passes < max_passes:
+            for test_data in self.val_dataloader:
+                if total >= target_rollouts:
+                    break
+
+                test_batch = DataProto.from_single_dict(test_data)
+                test_batch.meta_info = {
+                    'eos_token_id': self.tokenizer.eos_token_id,
+                    'pad_token_id': self.tokenizer.pad_token_id,
+                    'recompute_log_prob': False,
+                    'do_sample': False,
+                    'validate': True,
+                    "global_steps": global_steps
+                }
+
+                test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_batch)
+                test_batch = test_batch.union(test_output_gen_batch)
+
+                verifier_score, _, _, _ = self.val_reward_fn.verify(test_batch)
+                scores = verifier_score if isinstance(verifier_score, list) else list(verifier_score)
+                n_batch = len(scores)
+                remaining = target_rollouts - total
+                take_n = min(n_batch, remaining)
+                scores = scores[:take_n]
+
+                data_sources = test_batch.non_tensor_batch.get(
+                    'data_source',
+                    np.array([self.config.data.task_suite_name] * n_batch, dtype=object),
+                )
+                data_sources = data_sources[:take_n]
+
+                for i in range(take_n):
+                    s = float(scores[i])
+                    total += 1
+                    total_sum += s
+                    total_sumsq += s * s
+                    source_key = str(data_sources[i])
+                    data_source_stats[source_key][0] += 1
+                    data_source_stats[source_key][1] += s
+            passes += 1
+
         metric_dict = {}
-        for test_data in self.val_dataloader:
-            test_batch = DataProto.from_single_dict(test_data)
-           
-            test_batch.meta_info = {
-                'eos_token_id': self.tokenizer.eos_token_id,
-                'pad_token_id': self.tokenizer.pad_token_id,
-                'recompute_log_prob': False,
-                'do_sample': False,
-                'validate': True,
-                "global_steps":global_steps
-            }
+        for data_source, (count, score_sum) in data_source_stats.items():
+            if count > 0:
+                metric_dict[f'test_score/{data_source}'] = score_sum / count
 
-            test_output_gen_batch = self.actor_rollout_wg.generate_sequences(test_batch)
-            print('validation generation end')
+        if total == 0:
+            metric_dict['test_score/all'] = 0.0
+            metric_dict['test_score/all_std'] = 0.0
+            metric_dict['test_score/all_ci95_halfwidth'] = 0.0
+            metric_dict['test_score/num_rollouts'] = 0.0
+            return metric_dict
 
-            test_batch = test_batch.union(test_output_gen_batch)
+        mean = total_sum / total
+        var = max(total_sumsq / total - mean * mean, 0.0)
+        std = math.sqrt(var)
+        ci95_halfwidth = 1.96 * std / math.sqrt(total) if total > 1 else 0.0
 
-            # evaluate using reward_function
-            # for certain reward function (e.g. sandbox), the generation can overlap with reward
-            verifier_score, reward_metrics, format_metrics, reward_format_metrics = self.val_reward_fn.verify(test_batch)
-            reward_tensor=torch.tensor(verifier_score, dtype=torch.float32).unsqueeze(-1)
-
-            for k, v in reward_metrics.items():
-                metric_dict['test_reward/' + k] = v
-                
-            for k, v in format_metrics.items():
-                metric_dict['format_acc/' + k] = v
-                
-            for k, v in reward_format_metrics.items():
-                metric_dict['acc_wformat/' + k] = v
-            reward_tensor_lst.append(reward_tensor)
-            #data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
-            #data_source_lst.append( [self.config.data.task_suite_name] * reward_tensor.shape[0])
-            data_source_lst.append(test_batch.non_tensor_batch.get('data_source', [self.config.data.task_suite_name] * reward_tensor.shape[0]))
-
-        reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
-        data_sources = np.concatenate(data_source_lst, axis=0)
-        # evaluate test_score based on data source
-        data_source_reward = {}
-        for i in range(reward_tensor.shape[0]):
-            data_source = data_sources[i]
-            if data_source not in data_source_reward:
-                data_source_reward[data_source] = []
-            data_source_reward[data_source].append(reward_tensor[i].item())
-
-        metric_dict = {}
-        for data_source, rewards in data_source_reward.items():
-            metric_dict[f'test_score/{data_source}'] = np.mean(rewards)
-
-        metric_dict[f'test_score/all'] = reward_tensor.mean().item()
-
+        metric_dict['test_score/all'] = mean
+        metric_dict['test_score/all_std'] = std
+        metric_dict['test_score/all_ci95_halfwidth'] = ci95_halfwidth
+        metric_dict['test_score/num_rollouts'] = float(total)
         return metric_dict
 
     def init_workers(self):

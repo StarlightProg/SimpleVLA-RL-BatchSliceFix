@@ -93,6 +93,7 @@ actor_rollout_ref:
     val_micro_batch_size: 8
     model_family: openvla
     task_suite_name: libero_10
+    libero_mp_start_method: fork
     num_steps_wait: 10
     use_proprio: False
     pretrained_checkpoint: None
@@ -255,6 +256,9 @@ trainer:
     window_updates: 8
     ci_z: 1.96
     log_driver_memory: True
+  validation:
+    target_rollouts: 100
+    max_passes: 20
   default_hdfs_dir: ~/experiments/gsm8k/ppo/${trainer.experiment_name}
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   runtime_env: none

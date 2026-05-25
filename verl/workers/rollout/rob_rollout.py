@@ -467,9 +467,14 @@ class RobHFRollout(BaseRollout):
             self.env_thread_pool = ThreadPoolExecutor(max_workers=16)
             self.robotwin_version = self._detect_robotwin_version()
         else:
-            # Use spawn to avoid forking a process that already owns large model memory.
-            # This prevents long-run host RAM growth from copy-on-write side effects.
-            self.mp_ctx = multiprocessing.get_context("spawn")
+            # Libero runs in subprocesses; allow start method control for stability.
+            # On Linux, "fork" is typically lighter/faster for this workload than "spawn".
+            mp_start_method = getattr(self.config, "libero_mp_start_method", "fork")
+            try:
+                self.mp_ctx = multiprocessing.get_context(mp_start_method)
+            except ValueError:
+                print(f"Invalid libero_mp_start_method={mp_start_method}, fallback to 'fork'", flush=True)
+                self.mp_ctx = multiprocessing.get_context("fork")
         
     def _detect_robotwin_version(self):
         """Detect which version of robotwin to use based on config"""
@@ -705,6 +710,8 @@ class RobHFRollout(BaseRollout):
         
         while step < max_steps:
             active_indices = [i for i, r in enumerate(task_records) if r['active']]
+            if len(active_indices) == 0:
+                break
                 
             current_inputs = inputs
             current_task_descriptions = task_descriptions
@@ -853,7 +860,7 @@ class RobHFRollout(BaseRollout):
 
             while step < max_steps:
                 active_indices = [i for i, r in enumerate(task_records) if r['active']]
-
+             
                 current_inputs = inputs
                 current_task_descriptions = task_descriptions
 
