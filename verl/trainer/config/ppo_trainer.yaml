@@ -97,6 +97,7 @@ actor_rollout_ref:
     use_proprio: False
     pretrained_checkpoint: None
     center_crop: True
+    max_episode_steps: null
     max_prompt_length: 512
     num_images_in_input: 1  
     name: vllm

@@ -251,13 +251,33 @@ class RobActorRolloutRefWorker(Worker):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
             if self.config.model.vla == "openvla-oft":
-                actor_module = AutoModelForVision2Seq.from_pretrained(
-                                                        pretrained_model_name_or_path=local_path,
-                                                        torch_dtype=torch_dtype,
-                                                        #attn_implementation="flash_attention_2",
-                                                        config=actor_model_config,              
-                                                        trust_remote_code=True,
-                                                    )
+                openvla_oft_load_kwargs = dict(
+                    pretrained_model_name_or_path=local_path,
+                    torch_dtype=torch_dtype,
+                    config=actor_model_config,
+                    trust_remote_code=True,
+                )
+                flash_attn_available = False
+                try:
+                    import flash_attn  # noqa: F401
+                    flash_attn_available = True
+                except ImportError:
+                    pass
+                if flash_attn_available:
+                    try:
+                        actor_module = AutoModelForVision2Seq.from_pretrained(
+                            attn_implementation="flash_attention_2",
+                            **openvla_oft_load_kwargs,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "flash_attention_2 unavailable for openvla-oft (%s); using default attention.",
+                            exc,
+                        )
+                        actor_module = AutoModelForVision2Seq.from_pretrained(**openvla_oft_load_kwargs)
+                else:
+                    logger.warning("flash_attn not importable; using default attention for openvla-oft.")
+                    actor_module = AutoModelForVision2Seq.from_pretrained(**openvla_oft_load_kwargs)
                 if self.config.rollout.use_proprio and self.config.model.resume == False:
                     # Load proprio projector weights if available
                     actor_module.load_proprio_projector_weights(local_path)
@@ -277,13 +297,32 @@ class RobActorRolloutRefWorker(Worker):
                         "Otherwise, you may run into errors when trying to call `predict_action()` due to an absent `unnorm_key`."
                     )
             elif self.config.model.vla == "openvla":
-                actor_module = AutoModelForVision2Seq.from_pretrained(
-                                                    pretrained_model_name_or_path=local_path,
-                                                    torch_dtype=torch_dtype,
-                                                    attn_implementation="flash_attention_2",
-                                                    config=actor_model_config,              
-                                                    trust_remote_code=True,
-                                                )
+                openvla_load_kwargs = dict(
+                    pretrained_model_name_or_path=local_path,
+                    torch_dtype=torch_dtype,
+                    config=actor_model_config,
+                    trust_remote_code=True,
+                )
+                flash_ok = False
+                try:
+                    import flash_attn  # noqa: F401
+                    flash_ok = True
+                except ImportError:
+                    pass
+                if flash_ok:
+                    try:
+                        actor_module = AutoModelForVision2Seq.from_pretrained(
+                            attn_implementation="flash_attention_2",
+                            **openvla_load_kwargs,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "flash_attention_2 unavailable for openvla (%s); using default attention.",
+                            exc,
+                        )
+                        actor_module = AutoModelForVision2Seq.from_pretrained(**openvla_load_kwargs)
+                else:
+                    actor_module = AutoModelForVision2Seq.from_pretrained(**openvla_load_kwargs)
            
             actor_module.to(torch_dtype)
 
@@ -413,7 +452,7 @@ class RobActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        from verl.workers.actor import RobDataParallelPPOActor
+        from verl.workers.actor.dp_rob import RobDataParallelPPOActor
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get('external_lib', None))
 
@@ -478,6 +517,9 @@ class RobActorRolloutRefWorker(Worker):
         #data = data.to('cuda')
 
         assert self._is_actor
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
         if self._is_offload_param:
             load_fsdp_param_and_grad(module=self.actor_module_fsdp,
                                      device_id=torch.cuda.current_device(),

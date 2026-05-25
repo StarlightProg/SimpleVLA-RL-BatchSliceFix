@@ -473,12 +473,26 @@ class RobHFRollout(BaseRollout):
             print("RobotWin 2.0 fully encompasses RobotWin 1.0, therefore we prioritize support for RobotWin 2.0")
             raise ValueError
         
+    def _get_max_steps(self, task_suite_name: str) -> int:
+        override = getattr(self.config, "max_episode_steps", None)
+        if override is not None:
+            return int(override)
+        return self.max_steps.get(task_suite_name, 800)
+
+    def _fsdp_summon_context(self):
+        if not isinstance(self.module, FSDP):
+            return contextlib.nullcontext()
+        offload_to_cpu = os.environ.get("VERL_FSDP_SUMMON_OFFLOAD_CPU", "0") != "0"
+        return FSDP.summon_full_params(
+            self.module, writeback=False, recurse=False, offload_to_cpu=offload_to_cpu
+        )
+
     def vla_preprocess(self):
         if self.config.vla in ["openvla", "openvla-oft"]:
-            gpus = tf.config.experimental.list_physical_devices('GPU')
-            if gpus:
-                for gpu in gpus:
-                    tf.config.experimental.set_memory_growth(gpu, True)
+            try:
+                tf.config.set_visible_devices([], "GPU")
+            except Exception:
+                pass
         
         if self.config.vla in ["openvla-oft"]:
             if "libero" in self.config.task_suite_name:
@@ -615,7 +629,7 @@ class RobHFRollout(BaseRollout):
         trial_id = prompts.batch['trial_id'].repeat_interleave(n_samples, dim=0)
         trial_seed = prompts.batch['trial_seed'].repeat_interleave(n_samples, dim=0)
         task_suite_name = np.repeat(prompts.non_tensor_batch['task_suite_name'], n_samples)
-        max_steps = self.max_steps.get(self.config.task_suite_name, 800)
+        max_steps = self._get_max_steps(self.config.task_suite_name)
         batch_size = task_id.size(0)
         is_valid = meta_info.get('n_samples') is None
         global_steps = meta_info.get('global_steps', 0) if is_valid else 0
@@ -782,7 +796,7 @@ class RobHFRollout(BaseRollout):
         task_id = prompts.batch['task_id'].repeat_interleave(n_samples, dim=0)
         trial_id = prompts.batch['trial_id'].repeat_interleave(n_samples, dim=0)
         task_suite_name = np.repeat(prompts.non_tensor_batch['task_suite_name'], n_samples)
-        max_steps = self.max_steps[self.config.task_suite_name]
+        max_steps = self._get_max_steps(self.config.task_suite_name)
         batch_size = task_id.size(0)
         is_valid = meta_info.get('n_samples') is None
         global_steps = meta_info.get('global_steps', 0) if is_valid else 0
@@ -934,14 +948,10 @@ class RobHFRollout(BaseRollout):
         pixel_values = prompts["pixel_values"]
         proprio = prompts.get("proprio", None)
         
-        param_ctx = contextlib.nullcontext()
         do_sample = prompts.get('do_sample', self.config.do_sample)
         temperature = prompts.get('temperature', self.config.temperature)
         
-        if isinstance(self.module, FSDP):
-            param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
-        
-        with param_ctx:
+        with self._fsdp_summon_context():
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 actions, response = self.module.generate_action_verl(
                     input_ids=idx,
@@ -993,7 +1003,6 @@ class RobHFRollout(BaseRollout):
         
         batch_size = idx.size(0)
         prompt_length = idx.size(1)
-        param_ctx = contextlib.nullcontext()
         
         do_sample = prompts.get('do_sample', self.config.do_sample)
         response_length = self.module.get_action_dim(self.config.unnorm_key)
@@ -1006,10 +1015,7 @@ class RobHFRollout(BaseRollout):
         temperature = prompts.get('temperature', self.config.temperature)
         generation_config = GenerationConfig(temperature=temperature, top_p=top_p, top_k=top_k)
         
-        if isinstance(self.module, FSDP):
-            param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
-        
-        with param_ctx:
+        with self._fsdp_summon_context():
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 output = self.module.generate(
                     input_ids=idx,

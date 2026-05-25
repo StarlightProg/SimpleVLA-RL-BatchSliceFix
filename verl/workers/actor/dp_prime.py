@@ -29,7 +29,11 @@ from verl.utils.torch_functional import logprobs_from_logits, log_probs_from_log
 from verl.models.registry import check_model_support_rmpad
 from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 import verl.utils.torch_functional as verl_F
-from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis
+
+try:
+    from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis
+except ImportError:
+    pad_input = unpad_input = rearrange = index_first_axis = None
 
 __all__ = ['DataParallelPRIME']
 PRIME_LOSS = {

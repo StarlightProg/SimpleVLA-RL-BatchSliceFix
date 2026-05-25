@@ -13,8 +13,17 @@
 # limitations under the License.
 
 from .base import BasePPOActor
-from .dp_actor import DataParallelPPOActor
-from .dp_prime import DataParallelPRIME
+
+try:
+    from .dp_actor import DataParallelPPOActor
+except ImportError:
+    DataParallelPPOActor = None
+
+try:
+    from .dp_prime import DataParallelPRIME
+except ImportError:
+    DataParallelPRIME = None
+
 from .dp_rob import RobDataParallelPPOActor
 
-__all__ = ["BasePPOActor", "DataParallelPPOActor", "DataParallelPRIME","RobDataParallelPPOActor"]
+__all__ = ["BasePPOActor", "DataParallelPPOActor", "DataParallelPRIME", "RobDataParallelPPOActor"]

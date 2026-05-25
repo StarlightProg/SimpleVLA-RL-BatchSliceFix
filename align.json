@@ -5,7 +5,7 @@
     "VLLM_ATTENTION_BACKEND": "XFORMERS",
     "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     "TOKENIZERS_PARALLELISM": "true",
-    "WANDB_API_KEY": "YOUR WANDB_API_KEY"
+    "WANDB_API_KEY": "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"
   },
   "excludes": [
     "*"

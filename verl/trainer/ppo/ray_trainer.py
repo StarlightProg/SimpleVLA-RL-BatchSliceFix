@@ -664,12 +664,16 @@ class RayTrainer(object):
                         batch.meta_info['is_filtered'] = True
                         batch.meta_info['train_mode'] = False
                         actor_output = self.actor_rollout_wg.update_actor(batch)
-                        entropy_output = self.actor_rollout_wg.compute_entropy(data=batch)
+                        if self.config.actor_rollout_ref.actor.entropy_coeff > 0:
+                            entropy_output = self.actor_rollout_wg.compute_entropy(data=batch)
+                        else:
+                            entropy_output = None
                     metrics['timing/update_actor'] = timer.last
                     actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
-                    entropy_output_metrics = reduce_metrics(entropy_output.meta_info['metrics'])
                     metrics.update(actor_output_metrics)
-                    metrics.update(entropy_output_metrics)
+                    if entropy_output is not None:
+                        entropy_output_metrics = reduce_metrics(entropy_output.meta_info['metrics'])
+                        metrics.update(entropy_output_metrics)
                 # validate
                 if self.val_reward_fn is not None and (global_steps + 1) % self.config.trainer.test_freq == 0:
                     with Timer(name='testing', text="{name}: {seconds:.1f} seconds") as timer:

@@ -6,6 +6,40 @@ import os
 import imageio
 import numpy as np
 import tensorflow as tf
+
+# Keep TensorFlow on CPU so it does not reserve GPU memory alongside PyTorch/FSDP.
+try:
+    tf.config.set_visible_devices([], "GPU")
+except Exception:
+    pass
+
+
+def _configure_egl_device_from_visible_cuda() -> None:
+    """Align MuJoCo's EGL device with the CUDA devices visible to this worker.
+
+    Ray workers may receive different per-process CUDA visibility masks. When
+    MuJoCo/robosuite imports under EGL mode, robosuite asserts that
+    ``MUJOCO_EGL_DEVICE_ID`` belongs to ``CUDA_VISIBLE_DEVICES``. If the user
+    did not set an explicit EGL device, default to the first visible CUDA device
+    for the current worker process.
+    """
+    if os.environ.get("MUJOCO_GL") != "egl":
+        return
+
+    if os.environ.get("MUJOCO_EGL_DEVICE_ID"):
+        return
+
+    cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if not cuda_visible_devices:
+        return
+
+    first_visible_device = cuda_visible_devices.split(",")[0].strip()
+    if first_visible_device:
+        os.environ["MUJOCO_EGL_DEVICE_ID"] = first_visible_device
+
+
+_configure_egl_device_from_visible_cuda()
+
 try:
     from libero.libero import get_libero_path
     from libero.libero.envs import OffScreenRenderEnv
